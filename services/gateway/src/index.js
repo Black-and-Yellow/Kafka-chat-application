@@ -7,6 +7,12 @@ const { randomUUID } = require('crypto');
 const { extractToken, verifyToken } = require('./auth');
 const { SessionStore } = require('./sessionStore');
 const {
+	buildServerKeyPair,
+	decryptSessionKey,
+	encryptTextWithAesGcm,
+	decryptTextWithAesGcm
+} = require('./encryption');
+const {
 	startKafkaProducer,
 	startEventConsumer,
 	startPresenceConsumer,
@@ -23,6 +29,7 @@ const jwtSecret = process.env.JWT_SECRET || 'dev_secret_change_me';
 const nodeEnv = process.env.NODE_ENV || 'development';
 const { WebSocketServer } = WebSocket;
 const sessionStore = new SessionStore();
+const serverKeys = buildServerKeyPair();
 let kafkaRuntime;
 let eventConsumerRuntime;
 let presenceConsumerRuntime;
@@ -43,13 +50,55 @@ function sendError(socket, code, message) {
 	});
 }
 
+function resolveInboundMessageText(socket, payload) {
+	if (typeof payload?.text === 'string' && payload.text.trim() !== '') {
+		return payload.text.trim();
+	}
+
+	if (payload?.encrypted_text) {
+		const keyBuffer = sessionStore.getEncryptionKey(socket);
+		if (!keyBuffer) {
+			throw new Error('Encrypted message received before key exchange');
+		}
+
+		const plainText = decryptTextWithAesGcm(payload.encrypted_text, keyBuffer).trim();
+		if (!plainText) {
+			throw new Error('Decrypted message body is empty');
+		}
+
+		return plainText;
+	}
+
+	throw new Error('chat.message requires text or encrypted_text');
+}
+
+function buildOutboundMessageForSocket(socket, payload) {
+	const keyBuffer = sessionStore.getEncryptionKey(socket);
+	if (!keyBuffer || typeof payload?.text !== 'string') {
+		return payload;
+	}
+
+	const { text, ...rest } = payload;
+	return {
+		...rest,
+		encrypted: true,
+		encrypted_text: encryptTextWithAesGcm(text, keyBuffer)
+	};
+}
+
 function deliverMessageToRoom(payload) {
 	const roomSockets = sessionStore.getSocketsForRoom(payload.chat_id);
+	let encryptedFanout = 0;
 
 	for (const clientSocket of roomSockets) {
+		const outboundPayload = buildOutboundMessageForSocket(clientSocket, payload);
+		if (outboundPayload.encrypted) {
+			encryptedFanout += 1;
+		}
+
 		sendJson(clientSocket, {
 			type: 'chat.message',
-			payload
+			payload: outboundPayload
 		});
 	}
 
@@ -57,7 +106,8 @@ function deliverMessageToRoom(payload) {
 		{
 			chatId: payload.chat_id,
 			messageId: payload.message_id,
-			fanout: roomSockets.size
+			fanout: roomSockets.size,
+			encryptedFanout
 		},
 		'Delivered persisted message to active room sockets'
 	);
@@ -134,6 +184,31 @@ async function handleClientFrame(socket, rawFrame) {
 		return;
 	}
 
+	if (frame.type === 'crypto.key_exchange') {
+		const encryptedKey = frame.payload?.encrypted_key;
+		if (!encryptedKey || typeof encryptedKey !== 'string') {
+			sendError(socket, 'INVALID_KEY_EXCHANGE', 'encrypted_key is required');
+			return;
+		}
+
+		try {
+			const keyBuffer = decryptSessionKey(serverKeys.privateKey, encryptedKey);
+			sessionStore.setEncryptionKey(socket, keyBuffer);
+		} catch (error) {
+			logger.warn({ err: error, userId: session.userId }, 'Key exchange failed');
+			sendError(socket, 'KEY_EXCHANGE_FAILED', 'Could not establish encrypted session');
+			return;
+		}
+
+		sendJson(socket, {
+			type: 'crypto.ack',
+			payload: {
+				status: 'ready'
+			}
+		});
+		return;
+	}
+
 	if (frame.type === 'chat.join') {
 		const chatId = frame.payload?.chat_id;
 		if (!chatId) {
@@ -195,9 +270,16 @@ async function handleClientFrame(socket, rawFrame) {
 
 	if (frame.type === 'chat.message') {
 		const chatId = frame.payload?.chat_id;
-		const text = frame.payload?.text;
-		if (!chatId || typeof text !== 'string' || text.trim() === '') {
-			sendError(socket, 'INVALID_MESSAGE', 'chat_id and non-empty text are required');
+		if (!chatId) {
+			sendError(socket, 'INVALID_MESSAGE', 'chat_id is required');
+			return;
+		}
+
+		let normalizedText;
+		try {
+			normalizedText = resolveInboundMessageText(socket, frame.payload || {});
+		} catch (error) {
+			sendError(socket, 'INVALID_MESSAGE', error.message);
 			return;
 		}
 
@@ -211,7 +293,7 @@ async function handleClientFrame(socket, rawFrame) {
 				message_id: frame.payload?.client_msg_id || randomUUID(),
 				chat_id: chatId,
 				user_id: session.userId,
-				text: text.trim(),
+				text: normalizedText,
 				created_at: new Date().toISOString()
 			}
 		};
@@ -364,6 +446,18 @@ const httpServer = createServer((req, res) => {
 		return;
 	}
 
+	if (url.pathname === '/crypto/public-key') {
+		res.writeHead(200, { 'content-type': 'application/json' });
+		res.end(
+			JSON.stringify({
+				algorithm: 'RSA-OAEP-256',
+				fingerprint: serverKeys.fingerprint,
+				public_key: serverKeys.publicKey
+			})
+		);
+		return;
+	}
+
 	res.writeHead(404, { 'content-type': 'application/json' });
 	res.end(JSON.stringify({ error: 'Not found' }));
 });
@@ -455,6 +549,8 @@ wss.on('close', () => {
 });
 
 async function start() {
+	logger.info({ fingerprint: serverKeys.fingerprint }, 'Gateway RSA key pair ready');
+
 	kafkaRuntime = await startKafkaProducer(logger);
 
 	eventConsumerRuntime = await startEventConsumer(logger, {

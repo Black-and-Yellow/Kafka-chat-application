@@ -8,7 +8,8 @@ class SessionStore {
   add(socket, userId) {
     this.sessions.set(socket, {
       userId,
-      chats: new Set()
+      chats: new Set(),
+      encryptionKey: null
     });
   }
 
@@ -126,6 +127,25 @@ class SessionStore {
 
   getSession(socket) {
     return this.sessions.get(socket);
+  }
+
+  setEncryptionKey(socket, keyBuffer) {
+    const session = this.sessions.get(socket);
+    if (!session) {
+      return false;
+    }
+
+    session.encryptionKey = keyBuffer;
+    return true;
+  }
+
+  getEncryptionKey(socket) {
+    const session = this.sessions.get(socket);
+    if (!session) {
+      return null;
+    }
+
+    return session.encryptionKey;
   }
 
   getSocketsForRoom(chatId) {
