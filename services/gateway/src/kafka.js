@@ -3,8 +3,13 @@ const { Kafka, logLevel } = require('kafkajs');
 const TOPICS = {
   MESSAGES: 'messages',
   EVENTS: 'events',
-  PRESENCE: 'presence'
+  PRESENCE: 'presence',
+  DEAD_LETTERS: 'dead_letters'
 };
+
+function nextOffset(offset) {
+  return (BigInt(offset) + 1n).toString();
+}
 
 function parseBrokers() {
   const raw = process.env.KAFKA_BROKERS || 'localhost:9092';
@@ -41,7 +46,8 @@ async function ensureTopics(admin) {
     topics: [
       { topic: TOPICS.MESSAGES, numPartitions: 6, replicationFactor: 1 },
       { topic: TOPICS.EVENTS, numPartitions: 6, replicationFactor: 1 },
-      { topic: TOPICS.PRESENCE, numPartitions: 3, replicationFactor: 1 }
+      { topic: TOPICS.PRESENCE, numPartitions: 3, replicationFactor: 1 },
+      { topic: TOPICS.DEAD_LETTERS, numPartitions: 6, replicationFactor: 1 }
     ]
   });
 }
@@ -89,7 +95,7 @@ async function startEventConsumer(logger, handlers) {
         eventEnvelope = JSON.parse(value);
       } catch (error) {
         logger.error({ err: error, topic, partition, offset, value }, 'Invalid event payload in events topic');
-        await consumer.commitOffsets([{ topic, partition, offset: String(Number(offset) + 1) }]);
+        await consumer.commitOffsets([{ topic, partition, offset: nextOffset(offset) }]);
         return;
       }
 
@@ -100,7 +106,7 @@ async function startEventConsumer(logger, handlers) {
       });
 
       // Offset handling: commit only after event fanout succeeds.
-      await consumer.commitOffsets([{ topic, partition, offset: String(Number(offset) + 1) }]);
+      await consumer.commitOffsets([{ topic, partition, offset: nextOffset(offset) }]);
     }
   });
 
@@ -134,7 +140,7 @@ async function startPresenceConsumer(logger, handlers) {
         presencePayload = JSON.parse(value);
       } catch (error) {
         logger.error({ err: error, topic, partition, offset, value }, 'Invalid presence payload');
-        await consumer.commitOffsets([{ topic, partition, offset: String(Number(offset) + 1) }]);
+        await consumer.commitOffsets([{ topic, partition, offset: nextOffset(offset) }]);
         return;
       }
 
@@ -145,7 +151,7 @@ async function startPresenceConsumer(logger, handlers) {
       });
 
       // Offset handling: commit only after successful presence fanout.
-      await consumer.commitOffsets([{ topic, partition, offset: String(Number(offset) + 1) }]);
+      await consumer.commitOffsets([{ topic, partition, offset: nextOffset(offset) }]);
     }
   });
 

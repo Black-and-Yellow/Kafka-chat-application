@@ -23,6 +23,22 @@ function base64ToUint8Array(base64Value) {
   return bytes;
 }
 
+function mergeMessagesById(previousMessages, incomingMessages) {
+  const byId = new Map();
+
+  [...previousMessages, ...incomingMessages].forEach((message) => {
+    if (!message?.message_id) {
+      return;
+    }
+
+    byId.set(message.message_id, message);
+  });
+
+  return Array.from(byId.values())
+    .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())
+    .slice(0, 100);
+}
+
 function pemToArrayBuffer(pem) {
   const body = pem
     .replace('-----BEGIN PUBLIC KEY-----', '')
@@ -93,6 +109,8 @@ export default function App() {
   const typingStopTimeoutRef = useRef(null);
   const typingStateRef = useRef(false);
   const aesKeyRef = useRef(null);
+  const chatIdRef = useRef('global-room');
+  const userIdRef = useRef('alice');
   const [userId, setUserId] = useState('alice');
   const [chatId, setChatId] = useState('global-room');
   const [token, setToken] = useState('');
@@ -123,11 +141,16 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    chatIdRef.current = chatId;
     setMessages([]);
     setTypingUsers([]);
     setReadReceipts({});
     setPresenceByUser({});
   }, [chatId]);
+
+  useEffect(() => {
+    userIdRef.current = userId;
+  }, [userId]);
 
   function sendTypingEvent(isTyping) {
     if (status !== 'connected' || !socketRef.current) {
@@ -143,7 +166,7 @@ export default function App() {
       JSON.stringify({
         type: 'chat.typing',
         payload: {
-          chat_id: chatId,
+          chat_id: chatIdRef.current,
           is_typing: isTyping
         }
       })
@@ -161,7 +184,7 @@ export default function App() {
   }
 
   function updateTypingState(payload) {
-    if (!payload?.user_id || payload.chat_id !== chatId || payload.user_id === userId) {
+    if (!payload?.user_id || payload.chat_id !== chatIdRef.current || payload.user_id === userIdRef.current) {
       return;
     }
 
@@ -178,7 +201,7 @@ export default function App() {
   }
 
   function updateReadReceipts(payload) {
-    if (!payload?.message_id || payload.chat_id !== chatId) {
+    if (!payload?.message_id || payload.chat_id !== chatIdRef.current) {
       return;
     }
 
@@ -192,7 +215,7 @@ export default function App() {
   }
 
   function setPresenceFromJoined(payload) {
-    if (payload?.chat_id !== chatId) {
+    if (payload?.chat_id !== chatIdRef.current) {
       return;
     }
 
@@ -209,7 +232,7 @@ export default function App() {
   }
 
   function updatePresence(payload) {
-    if (!payload?.user_id || payload.chat_id !== chatId) {
+    if (!payload?.user_id || payload.chat_id !== chatIdRef.current) {
       return;
     }
 
@@ -325,7 +348,7 @@ export default function App() {
       ws.send(
         JSON.stringify({
           type: 'chat.join',
-          payload: { chat_id: chatId }
+          payload: { chat_id: chatIdRef.current }
         })
       );
 
@@ -339,13 +362,29 @@ export default function App() {
       try {
         const frame = JSON.parse(event.data);
 
+        if (frame.type === 'chat.history') {
+          if (frame.payload?.chat_id !== chatIdRef.current) {
+            return;
+          }
+
+          const history = Array.isArray(frame.payload?.messages) ? frame.payload.messages : [];
+          const normalizedHistory = [];
+
+          for (const historyMessage of history) {
+            normalizedHistory.push(await normalizeInboundMessage(historyMessage));
+          }
+
+          setMessages((prev) => mergeMessagesById(prev, normalizedHistory));
+          return;
+        }
+
         if (frame.type === 'chat.message') {
-          if (frame.payload?.chat_id !== chatId) {
+          if (frame.payload?.chat_id !== chatIdRef.current) {
             return;
           }
 
           const normalizedPayload = await normalizeInboundMessage(frame.payload);
-          setMessages((prev) => [normalizedPayload, ...prev].slice(0, 50));
+          setMessages((prev) => mergeMessagesById(prev, [normalizedPayload]));
           return;
         }
 
@@ -392,6 +431,7 @@ export default function App() {
     ws.onerror = () => {
       setStatus('error');
       setEncryptionStatus('error');
+      setErrors((prev) => ['WebSocket transport error', ...prev].slice(0, 5));
     };
   }
 
@@ -401,7 +441,7 @@ export default function App() {
     }
 
     const payload = {
-      chat_id: chatId,
+      chat_id: chatIdRef.current,
       client_msg_id: crypto.randomUUID()
     };
 
@@ -435,7 +475,7 @@ export default function App() {
       JSON.stringify({
         type: 'chat.read',
         payload: {
-          chat_id: chatId,
+          chat_id: chatIdRef.current,
           message_id: messageId
         }
       })
@@ -462,7 +502,7 @@ export default function App() {
     socketRef.current.send(
       JSON.stringify({
         type: 'chat.join',
-        payload: { chat_id: chatId }
+        payload: { chat_id: chatIdRef.current }
       })
     );
   }
@@ -475,7 +515,7 @@ export default function App() {
     socketRef.current.send(
       JSON.stringify({
         type: 'chat.leave',
-        payload: { chat_id: chatId }
+        payload: { chat_id: chatIdRef.current }
       })
     );
   }
@@ -499,7 +539,7 @@ export default function App() {
         </div>
 
         <div className="controls">
-          <button type="button" onClick={() => issueDevToken().catch((error) => setErrors((prev) => [error.message, ...prev]))}>
+          <button type="button" onClick={() => issueDevToken().catch((error) => setErrors((prev) => [error.message, ...prev].slice(0, 5)))}>
             Issue Dev Token
           </button>
           <button type="button" onClick={connect}>Connect</button>

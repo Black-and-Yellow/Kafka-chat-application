@@ -23,16 +23,43 @@ const {
 
 dotenv.config();
 
-const logger = pino({ name: 'gateway' });
+const logger = pino({
+	name: 'gateway',
+	level: process.env.LOG_LEVEL || 'info'
+});
+
+function readPositiveInteger(envName, fallback) {
+	const parsed = Number.parseInt(process.env[envName] || '', 10);
+	if (!Number.isFinite(parsed) || parsed <= 0) {
+		return fallback;
+	}
+
+	return parsed;
+}
+
 const port = Number(process.env.GATEWAY_PORT || 8080);
 const jwtSecret = process.env.JWT_SECRET || 'dev_secret_change_me';
 const nodeEnv = process.env.NODE_ENV || 'development';
+const messageServiceUrl = process.env.MESSAGE_SERVICE_URL || 'http://localhost:8090';
+const historyLimit = readPositiveInteger('CHAT_HISTORY_LIMIT', 30);
+const maxMessageLength = readPositiveInteger('CHAT_MAX_MESSAGE_LENGTH', 4000);
+const maxFrameBytes = readPositiveInteger('GATEWAY_MAX_FRAME_BYTES', 32768);
+const frameRateWindowMs = readPositiveInteger('GATEWAY_FRAME_RATE_WINDOW_MS', 60000);
+const frameRateLimit = readPositiveInteger('GATEWAY_FRAME_RATE_LIMIT', 120);
 const { WebSocketServer } = WebSocket;
 const sessionStore = new SessionStore();
 const serverKeys = buildServerKeyPair();
 let kafkaRuntime;
 let eventConsumerRuntime;
 let presenceConsumerRuntime;
+
+const readiness = {
+	kafkaProducer: false,
+	eventsConsumer: false,
+	presenceConsumer: false
+};
+
+const socketFrameRateCounters = new WeakMap();
 
 function sendJson(socket, body) {
 	if (socket.readyState === WebSocket.OPEN) {
@@ -48,6 +75,62 @@ function sendError(socket, code, message) {
 			message
 		}
 	});
+}
+
+function sendHttpJson(res, statusCode, body) {
+	res.writeHead(statusCode, { 'content-type': 'application/json' });
+	res.end(JSON.stringify(body));
+}
+
+function isRateLimitExceeded(socket) {
+	const now = Date.now();
+	const existing = socketFrameRateCounters.get(socket);
+
+	if (!existing || now - existing.windowStart >= frameRateWindowMs) {
+		socketFrameRateCounters.set(socket, {
+			windowStart: now,
+			count: 1
+		});
+		return false;
+	}
+
+	existing.count += 1;
+	return existing.count > frameRateLimit;
+}
+
+function normalizeHistoryLimit(rawLimit) {
+	const parsed = Number(rawLimit);
+	if (!Number.isFinite(parsed)) {
+		return 30;
+	}
+
+	return Math.max(1, Math.min(100, Math.floor(parsed)));
+}
+
+async function fetchChatHistory(chatId) {
+	const limit = normalizeHistoryLimit(historyLimit);
+	const controller = new AbortController();
+	const timeout = setTimeout(() => controller.abort(), 2500);
+
+	try {
+		const endpoint = `${messageServiceUrl}/messages?chat_id=${encodeURIComponent(chatId)}&limit=${limit}`;
+		const response = await fetch(endpoint, {
+			signal: controller.signal
+		});
+
+		if (!response.ok) {
+			throw new Error(`Message history request failed with status ${response.status}`);
+		}
+
+		const data = await response.json();
+		if (!Array.isArray(data.messages)) {
+			return [];
+		}
+
+		return data.messages;
+	} finally {
+		clearTimeout(timeout);
+	}
 }
 
 function resolveInboundMessageText(socket, payload) {
@@ -171,10 +254,25 @@ async function emitPresenceUpdate(chatId, userId, status) {
 async function handleClientFrame(socket, rawFrame) {
 	let frame;
 
+	if (Buffer.byteLength(rawFrame) > maxFrameBytes) {
+		sendError(socket, 'FRAME_TOO_LARGE', `Frame exceeds ${maxFrameBytes} bytes`);
+		return;
+	}
+
+	if (isRateLimitExceeded(socket)) {
+		sendError(socket, 'RATE_LIMITED', 'Too many messages in a short time window');
+		return;
+	}
+
 	try {
 		frame = JSON.parse(rawFrame.toString());
 	} catch {
 		sendError(socket, 'BAD_JSON', 'Frame must be valid JSON');
+		return;
+	}
+
+	if (typeof frame?.type !== 'string') {
+		sendError(socket, 'INVALID_FRAME', 'Frame type must be a string');
 		return;
 	}
 
@@ -210,7 +308,8 @@ async function handleClientFrame(socket, rawFrame) {
 	}
 
 	if (frame.type === 'chat.join') {
-		const chatId = frame.payload?.chat_id;
+		const chatIdRaw = frame.payload?.chat_id;
+		const chatId = typeof chatIdRaw === 'string' ? chatIdRaw.trim() : '';
 		if (!chatId) {
 			sendError(socket, 'INVALID_CHAT', 'chat_id is required');
 			return;
@@ -234,11 +333,26 @@ async function handleClientFrame(socket, rawFrame) {
 				online_users: sessionStore.getOnlineUsersForRoom(chatId)
 			}
 		});
+
+		try {
+			const historyMessages = await fetchChatHistory(chatId);
+			const outboundHistory = historyMessages.map((message) => buildOutboundMessageForSocket(socket, message));
+			sendJson(socket, {
+				type: 'chat.history',
+				payload: {
+					chat_id: chatId,
+					messages: outboundHistory
+				}
+			});
+		} catch (error) {
+			logger.warn({ err: error, chatId }, 'Failed to fetch room history on join');
+		}
 		return;
 	}
 
 	if (frame.type === 'chat.leave') {
-		const chatId = frame.payload?.chat_id;
+		const chatIdRaw = frame.payload?.chat_id;
+		const chatId = typeof chatIdRaw === 'string' ? chatIdRaw.trim() : '';
 		if (!chatId) {
 			sendError(socket, 'INVALID_CHAT', 'chat_id is required');
 			return;
@@ -269,7 +383,8 @@ async function handleClientFrame(socket, rawFrame) {
 	}
 
 	if (frame.type === 'chat.message') {
-		const chatId = frame.payload?.chat_id;
+		const chatIdRaw = frame.payload?.chat_id;
+		const chatId = typeof chatIdRaw === 'string' ? chatIdRaw.trim() : '';
 		if (!chatId) {
 			sendError(socket, 'INVALID_MESSAGE', 'chat_id is required');
 			return;
@@ -280,6 +395,11 @@ async function handleClientFrame(socket, rawFrame) {
 			normalizedText = resolveInboundMessageText(socket, frame.payload || {});
 		} catch (error) {
 			sendError(socket, 'INVALID_MESSAGE', error.message);
+			return;
+		}
+
+		if (normalizedText.length > maxMessageLength) {
+			sendError(socket, 'INVALID_MESSAGE', `Message exceeds ${maxMessageLength} characters`);
 			return;
 		}
 
@@ -331,7 +451,8 @@ async function handleClientFrame(socket, rawFrame) {
 	}
 
 	if (frame.type === 'chat.typing') {
-		const chatId = frame.payload?.chat_id;
+		const chatIdRaw = frame.payload?.chat_id;
+		const chatId = typeof chatIdRaw === 'string' ? chatIdRaw.trim() : '';
 		const isTyping = frame.payload?.is_typing;
 
 		if (!chatId || typeof isTyping !== 'boolean') {
@@ -376,8 +497,10 @@ async function handleClientFrame(socket, rawFrame) {
 	}
 
 	if (frame.type === 'chat.read') {
-		const chatId = frame.payload?.chat_id;
-		const messageId = frame.payload?.message_id;
+		const chatIdRaw = frame.payload?.chat_id;
+		const chatId = typeof chatIdRaw === 'string' ? chatIdRaw.trim() : '';
+		const messageIdRaw = frame.payload?.message_id;
+		const messageId = typeof messageIdRaw === 'string' ? messageIdRaw.trim() : '';
 
 		if (!chatId || !messageId) {
 			sendError(socket, 'INVALID_READ_RECEIPT', 'chat_id and message_id are required');
@@ -427,45 +550,59 @@ const httpServer = createServer((req, res) => {
 	const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
 
 	if (url.pathname === '/health') {
-		res.writeHead(200, { 'content-type': 'application/json' });
-		res.end(JSON.stringify({ ok: true, service: 'gateway' }));
+		sendHttpJson(res, 200, {
+			ok: true,
+			service: 'gateway',
+			readiness,
+			active_connections: wss.clients.size,
+			uptime_seconds: Math.round(process.uptime())
+		});
+		return;
+	}
+
+	if (url.pathname === '/ready') {
+		const ready = readiness.kafkaProducer && readiness.eventsConsumer && readiness.presenceConsumer;
+		sendHttpJson(res, ready ? 200 : 503, {
+			ok: ready,
+			service: 'gateway',
+			readiness
+		});
 		return;
 	}
 
 	if (url.pathname === '/dev/token' && nodeEnv !== 'production') {
 		const userId = url.searchParams.get('user_id');
 		if (!userId) {
-			res.writeHead(400, { 'content-type': 'application/json' });
-			res.end(JSON.stringify({ error: 'user_id query param is required' }));
+			sendHttpJson(res, 400, { error: 'user_id query param is required' });
 			return;
 		}
 
 		const token = jwt.sign({ user_id: userId }, jwtSecret, { expiresIn: '12h' });
-		res.writeHead(200, { 'content-type': 'application/json' });
-		res.end(JSON.stringify({ token }));
+		sendHttpJson(res, 200, { token });
 		return;
 	}
 
 	if (url.pathname === '/crypto/public-key') {
-		res.writeHead(200, { 'content-type': 'application/json' });
-		res.end(
-			JSON.stringify({
-				algorithm: 'RSA-OAEP-256',
-				fingerprint: serverKeys.fingerprint,
-				public_key: serverKeys.publicKey
-			})
-		);
+		sendHttpJson(res, 200, {
+			algorithm: 'RSA-OAEP-256',
+			fingerprint: serverKeys.fingerprint,
+			public_key: serverKeys.publicKey
+		});
 		return;
 	}
 
-	res.writeHead(404, { 'content-type': 'application/json' });
-	res.end(JSON.stringify({ error: 'Not found' }));
+	sendHttpJson(res, 404, { error: 'Not found' });
 });
 
 const wss = new WebSocketServer({ noServer: true });
 
 wss.on('connection', (socket, request, identity) => {
 	socket.isAlive = true;
+	socketFrameRateCounters.set(socket, {
+		windowStart: Date.now(),
+		count: 0
+	});
+
 	socket.on('pong', () => {
 		socket.isAlive = true;
 	});
@@ -490,6 +627,8 @@ wss.on('connection', (socket, request, identity) => {
 	});
 
 	socket.on('close', () => {
+		socketFrameRateCounters.delete(socket);
+
 		const removalState = sessionStore.remove(socket);
 		if (!removalState || !kafkaRuntime) {
 			return;
@@ -552,6 +691,7 @@ async function start() {
 	logger.info({ fingerprint: serverKeys.fingerprint }, 'Gateway RSA key pair ready');
 
 	kafkaRuntime = await startKafkaProducer(logger);
+	readiness.kafkaProducer = true;
 
 	eventConsumerRuntime = await startEventConsumer(logger, {
 		async onEvent(eventEnvelope) {
@@ -565,12 +705,14 @@ async function start() {
 			}
 		}
 	});
+	readiness.eventsConsumer = true;
 
 	presenceConsumerRuntime = await startPresenceConsumer(logger, {
 		async onPresence(payload) {
 			fanoutPresenceToRoom(payload);
 		}
 	});
+	readiness.presenceConsumer = true;
 
 	httpServer.listen(port, () => {
 		logger.info({ port }, 'Gateway is listening');
@@ -582,16 +724,25 @@ async function shutdown(signal) {
 	clearInterval(heartbeatInterval);
 	httpServer.close();
 
+	wss.clients.forEach((socket) => {
+		if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CLOSING) {
+			socket.close(1001, 'Server shutting down');
+		}
+	});
+
 	if (kafkaRuntime) {
 		await kafkaRuntime.disconnect();
+		readiness.kafkaProducer = false;
 	}
 
 	if (eventConsumerRuntime) {
 		await eventConsumerRuntime.disconnect();
+		readiness.eventsConsumer = false;
 	}
 
 	if (presenceConsumerRuntime) {
 		await presenceConsumerRuntime.disconnect();
+		readiness.presenceConsumer = false;
 	}
 
 	process.exit(0);
