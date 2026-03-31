@@ -1,0 +1,14 @@
+{
+  "name": "@chat/message-service",
+  "version": "0.1.0",
+  "private": true,
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "node src/index.js",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "pino": "^9.4.0"
+  }
+}

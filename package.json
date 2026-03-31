@@ -1,0 +1,20 @@
+{
+  "name": "kafka-chat-application",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "services/*",
+    "web/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n gateway,message,client \"npm run dev:gateway\" \"npm run dev:message\" \"npm run dev:client\"",
+    "dev:gateway": "npm --workspace services/gateway run dev",
+    "dev:message": "npm --workspace services/message-service run dev",
+    "dev:client": "npm --workspace web/client run dev",
+    "build:client": "npm --workspace web/client run build"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.1"
+  }
+}

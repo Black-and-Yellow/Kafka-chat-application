@@ -1,0 +1,27 @@
+:root {
+  font-family: "Space Grotesk", "Segoe UI", sans-serif;
+  color: #16253d;
+  background: radial-gradient(circle at top, #f9f4e3 0%, #ffe0a8 40%, #f5c27a 100%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+.app {
+  max-width: 720px;
+  margin: 8vh auto;
+  padding: 2.5rem;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(22, 37, 61, 0.18);
+  border-radius: 20px;
+}
+
+h1 {
+  margin-top: 0;
+}
