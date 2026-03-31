@@ -30,6 +30,11 @@ function createKafka(logger) {
   });
 }
 
+function resolveGatewayGroup(baseGroupName) {
+  const instanceId = process.env.GATEWAY_INSTANCE_ID || process.env.HOSTNAME || 'local';
+  return `${baseGroupName}-${instanceId}`;
+}
+
 async function ensureTopics(admin) {
   await admin.createTopics({
     waitForLeaders: true,
@@ -65,7 +70,9 @@ async function startKafkaProducer(logger) {
 async function startEventConsumer(logger, handlers) {
   const kafka = createKafka(logger);
   const consumer = kafka.consumer({
-    groupId: process.env.GATEWAY_EVENTS_GROUP || 'gateway-events-v1'
+    // Each gateway instance needs its own group to receive the full event stream
+    // and deliver to clients connected to that specific node.
+    groupId: resolveGatewayGroup(process.env.GATEWAY_EVENTS_GROUP || 'gateway-events-v1')
   });
 
   await consumer.connect();
@@ -110,7 +117,7 @@ async function startEventConsumer(logger, handlers) {
 async function startPresenceConsumer(logger, handlers) {
   const kafka = createKafka(logger);
   const consumer = kafka.consumer({
-    groupId: process.env.GATEWAY_PRESENCE_GROUP || 'gateway-presence-v1'
+    groupId: resolveGatewayGroup(process.env.GATEWAY_PRESENCE_GROUP || 'gateway-presence-v1')
   });
 
   await consumer.connect();
