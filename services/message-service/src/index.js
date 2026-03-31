@@ -1,9 +1,73 @@
 const dotenv = require('dotenv');
 const pino = require('pino');
+const { createServer } = require('http');
+const { startMessageConsumer } = require('./kafkaConsumer');
 
 dotenv.config();
 
 const logger = pino({ name: 'message-service' });
 const port = Number(process.env.MESSAGE_SERVICE_PORT || 8090);
+let kafkaRuntime;
 
-logger.info({ port }, 'Message service scaffold is up');
+const server = createServer((req, res) => {
+	const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+
+	if (url.pathname === '/health') {
+		res.writeHead(200, { 'content-type': 'application/json' });
+		res.end(JSON.stringify({ ok: true, service: 'message-service' }));
+		return;
+	}
+
+	res.writeHead(404, { 'content-type': 'application/json' });
+	res.end(JSON.stringify({ error: 'Not found' }));
+});
+
+async function start() {
+	kafkaRuntime = await startMessageConsumer(logger, {
+		async onMessage(payload, meta) {
+			logger.info(
+				{
+					meta,
+					chatId: payload.chat_id,
+					messageId: payload.message_id,
+					userId: payload.user_id
+				},
+				'Consumed chat message from Kafka'
+			);
+		}
+	});
+
+	server.listen(port, () => {
+		logger.info({ port }, 'Message service is listening');
+	});
+}
+
+async function shutdown(signal) {
+	logger.info({ signal }, 'Shutting down message service');
+	server.close();
+
+	if (kafkaRuntime) {
+		await kafkaRuntime.disconnect();
+	}
+
+	process.exit(0);
+}
+
+process.on('SIGINT', () => {
+	shutdown('SIGINT').catch((error) => {
+		logger.error({ err: error }, 'Error while shutting down after SIGINT');
+		process.exit(1);
+	});
+});
+
+process.on('SIGTERM', () => {
+	shutdown('SIGTERM').catch((error) => {
+		logger.error({ err: error }, 'Error while shutting down after SIGTERM');
+		process.exit(1);
+	});
+});
+
+start().catch((error) => {
+	logger.error({ err: error }, 'Message service failed to start');
+	process.exit(1);
+});

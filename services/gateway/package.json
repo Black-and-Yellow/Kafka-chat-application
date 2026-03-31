@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "dotenv": "^16.4.5",
+    "kafkajs": "^2.2.4",
     "jsonwebtoken": "^9.0.2",
     "pino": "^9.4.0",
     "ws": "^8.18.0"

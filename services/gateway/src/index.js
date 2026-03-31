@@ -6,6 +6,7 @@ const pino = require('pino');
 const { randomUUID } = require('crypto');
 const { extractToken, verifyToken } = require('./auth');
 const { SessionStore } = require('./sessionStore');
+const { startKafkaProducer, publishChatMessage } = require('./kafka');
 
 dotenv.config();
 
@@ -15,6 +16,7 @@ const jwtSecret = process.env.JWT_SECRET || 'dev_secret_change_me';
 const nodeEnv = process.env.NODE_ENV || 'development';
 const { WebSocketServer } = WebSocket;
 const sessionStore = new SessionStore();
+let kafkaRuntime;
 
 function sendJson(socket, body) {
 	if (socket.readyState === WebSocket.OPEN) {
@@ -32,7 +34,7 @@ function sendError(socket, code, message) {
 	});
 }
 
-function handleClientFrame(socket, rawFrame) {
+async function handleClientFrame(socket, rawFrame) {
 	let frame;
 
 	try {
@@ -88,6 +90,19 @@ function handleClientFrame(socket, rawFrame) {
 				created_at: new Date().toISOString()
 			}
 		};
+
+		if (!kafkaRuntime) {
+			sendError(socket, 'KAFKA_UNAVAILABLE', 'Kafka producer is not connected');
+			return;
+		}
+
+		try {
+			await publishChatMessage(kafkaRuntime.producer, outbound.payload);
+		} catch (error) {
+			logger.error({ err: error, chatId, messageId: outbound.payload.message_id }, 'Kafka publish failed');
+			sendError(socket, 'PUBLISH_FAILED', 'Unable to queue message for durable processing');
+			return;
+		}
 
 		const roomSockets = sessionStore.getSocketsForRoom(chatId);
 		for (const clientSocket of roomSockets) {
@@ -162,9 +177,9 @@ wss.on('connection', (socket, request, identity) => {
 		}
 	});
 
-	socket.on('message', (frame) => {
+	socket.on('message', async (frame) => {
 		try {
-			handleClientFrame(socket, frame);
+			await handleClientFrame(socket, frame);
 		} catch (error) {
 			logger.error({ err: error }, 'Unhandled frame error');
 			sendError(socket, 'INTERNAL_ERROR', 'Unexpected error while processing frame');
@@ -214,6 +229,41 @@ wss.on('close', () => {
 	clearInterval(heartbeatInterval);
 });
 
-httpServer.listen(port, () => {
-	logger.info({ port }, 'Gateway is listening');
+async function start() {
+	kafkaRuntime = await startKafkaProducer(logger);
+
+	httpServer.listen(port, () => {
+		logger.info({ port }, 'Gateway is listening');
+	});
+}
+
+async function shutdown(signal) {
+	logger.info({ signal }, 'Shutting down gateway');
+	clearInterval(heartbeatInterval);
+	httpServer.close();
+
+	if (kafkaRuntime) {
+		await kafkaRuntime.disconnect();
+	}
+
+	process.exit(0);
+}
+
+process.on('SIGINT', () => {
+	shutdown('SIGINT').catch((error) => {
+		logger.error({ err: error }, 'Error while shutting down after SIGINT');
+		process.exit(1);
+	});
+});
+
+process.on('SIGTERM', () => {
+	shutdown('SIGTERM').catch((error) => {
+		logger.error({ err: error }, 'Error while shutting down after SIGTERM');
+		process.exit(1);
+	});
+});
+
+start().catch((error) => {
+	logger.error({ err: error }, 'Gateway failed to start');
+	process.exit(1);
 });
