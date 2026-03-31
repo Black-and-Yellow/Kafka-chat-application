@@ -3,12 +3,14 @@ const pino = require('pino');
 const { createServer } = require('http');
 const { startMessageConsumer } = require('./kafkaConsumer');
 const { migrate, saveMessage, closePool } = require('./db');
+const { startEventPublisher, publishDeliverEvent } = require('./eventPublisher');
 
 dotenv.config();
 
 const logger = pino({ name: 'message-service' });
 const port = Number(process.env.MESSAGE_SERVICE_PORT || 8090);
 let kafkaRuntime;
+let publisherRuntime;
 
 const server = createServer((req, res) => {
 	const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
@@ -26,6 +28,8 @@ const server = createServer((req, res) => {
 async function start() {
 	await migrate(logger);
 
+	publisherRuntime = await startEventPublisher(logger);
+
 	kafkaRuntime = await startMessageConsumer(logger, {
 		async onMessage(payload, meta) {
 			const writeResult = await saveMessage(logger, payload);
@@ -42,6 +46,8 @@ async function start() {
 				);
 				return;
 			}
+
+			await publishDeliverEvent(publisherRuntime.producer, payload);
 
 			logger.info(
 				{
@@ -66,6 +72,10 @@ async function shutdown(signal) {
 
 	if (kafkaRuntime) {
 		await kafkaRuntime.disconnect();
+	}
+
+	if (publisherRuntime) {
+		await publisherRuntime.disconnect();
 	}
 
 	await closePool();

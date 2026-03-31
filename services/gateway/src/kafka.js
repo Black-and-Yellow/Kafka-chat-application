@@ -62,6 +62,51 @@ async function startKafkaProducer(logger) {
   };
 }
 
+async function startEventConsumer(logger, handlers) {
+  const kafka = createKafka(logger);
+  const consumer = kafka.consumer({
+    groupId: process.env.GATEWAY_EVENTS_GROUP || 'gateway-events-v1'
+  });
+
+  await consumer.connect();
+  await consumer.subscribe({ topic: TOPICS.EVENTS, fromBeginning: false });
+
+  await consumer.run({
+    autoCommit: false,
+    eachMessage: async ({ topic, partition, message }) => {
+      const value = message.value ? message.value.toString() : '{}';
+      const offset = message.offset;
+
+      let eventEnvelope;
+      try {
+        eventEnvelope = JSON.parse(value);
+      } catch (error) {
+        logger.error({ err: error, topic, partition, offset, value }, 'Invalid event payload in events topic');
+        await consumer.commitOffsets([{ topic, partition, offset: String(Number(offset) + 1) }]);
+        return;
+      }
+
+      await handlers.onEvent(eventEnvelope, {
+        topic,
+        partition,
+        offset
+      });
+
+      // Offset handling: commit only after event fanout succeeds.
+      await consumer.commitOffsets([{ topic, partition, offset: String(Number(offset) + 1) }]);
+    }
+  });
+
+  logger.info('Gateway event consumer connected');
+
+  return {
+    consumer,
+    async disconnect() {
+      await consumer.disconnect();
+    }
+  };
+}
+
 async function publishChatMessage(producer, payload) {
   await producer.send({
     topic: TOPICS.MESSAGES,
@@ -83,5 +128,6 @@ async function publishChatMessage(producer, payload) {
 module.exports = {
   TOPICS,
   startKafkaProducer,
+  startEventConsumer,
   publishChatMessage
 };

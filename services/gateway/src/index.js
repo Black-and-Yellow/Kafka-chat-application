@@ -6,7 +6,7 @@ const pino = require('pino');
 const { randomUUID } = require('crypto');
 const { extractToken, verifyToken } = require('./auth');
 const { SessionStore } = require('./sessionStore');
-const { startKafkaProducer, publishChatMessage } = require('./kafka');
+const { startKafkaProducer, startEventConsumer, publishChatMessage } = require('./kafka');
 
 dotenv.config();
 
@@ -17,6 +17,7 @@ const nodeEnv = process.env.NODE_ENV || 'development';
 const { WebSocketServer } = WebSocket;
 const sessionStore = new SessionStore();
 let kafkaRuntime;
+let eventConsumerRuntime;
 
 function sendJson(socket, body) {
 	if (socket.readyState === WebSocket.OPEN) {
@@ -32,6 +33,26 @@ function sendError(socket, code, message) {
 			message
 		}
 	});
+}
+
+function deliverMessageToRoom(payload) {
+	const roomSockets = sessionStore.getSocketsForRoom(payload.chat_id);
+
+	for (const clientSocket of roomSockets) {
+		sendJson(clientSocket, {
+			type: 'chat.message',
+			payload
+		});
+	}
+
+	logger.info(
+		{
+			chatId: payload.chat_id,
+			messageId: payload.message_id,
+			fanout: roomSockets.size
+		},
+		'Delivered persisted message to active room sockets'
+	);
 }
 
 async function handleClientFrame(socket, rawFrame) {
@@ -104,16 +125,11 @@ async function handleClientFrame(socket, rawFrame) {
 			return;
 		}
 
-		const roomSockets = sessionStore.getSocketsForRoom(chatId);
-		for (const clientSocket of roomSockets) {
-			sendJson(clientSocket, outbound);
-		}
-
 		sendJson(socket, {
 			type: 'chat.ack',
 			payload: {
 				message_id: outbound.payload.message_id,
-				status: 'accepted'
+				status: 'queued'
 			}
 		});
 
@@ -121,10 +137,9 @@ async function handleClientFrame(socket, rawFrame) {
 			{
 				chatId,
 				userId: session.userId,
-				messageId: outbound.payload.message_id,
-				fanout: roomSockets.size
+				messageId: outbound.payload.message_id
 			},
-			'Broadcasted message to room'
+			'Queued message to Kafka messages topic'
 		);
 		return;
 	}
@@ -232,6 +247,16 @@ wss.on('close', () => {
 async function start() {
 	kafkaRuntime = await startKafkaProducer(logger);
 
+	eventConsumerRuntime = await startEventConsumer(logger, {
+		async onEvent(eventEnvelope) {
+			if (eventEnvelope.type !== 'chat.deliver') {
+				return;
+			}
+
+			deliverMessageToRoom(eventEnvelope.payload);
+		}
+	});
+
 	httpServer.listen(port, () => {
 		logger.info({ port }, 'Gateway is listening');
 	});
@@ -244,6 +269,10 @@ async function shutdown(signal) {
 
 	if (kafkaRuntime) {
 		await kafkaRuntime.disconnect();
+	}
+
+	if (eventConsumerRuntime) {
+		await eventConsumerRuntime.disconnect();
 	}
 
 	process.exit(0);
