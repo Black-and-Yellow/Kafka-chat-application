@@ -27,6 +27,12 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
 
   postgres:
     image: postgres:16-alpine
@@ -39,16 +45,25 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
 
   message-service:
     build:
       context: .
       dockerfile: services/message-service/Dockerfile
     depends_on:
-      - kafka
-      - postgres
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
     environment:
       NODE_ENV: production
+      LOG_LEVEL: info
       MESSAGE_SERVICE_PORT: 8090
       KAFKA_CLIENT_ID: message-service
       KAFKA_BROKERS: kafka:29092
@@ -62,30 +77,48 @@ services:
     expose:
       - "8090"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8090/ready | grep '\"ok\":true' > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
 
   gateway:
     build:
       context: .
       dockerfile: services/gateway/Dockerfile
     depends_on:
-      - kafka
-      - message-service
+      kafka:
+        condition: service_healthy
+      message-service:
+        condition: service_healthy
     environment:
       NODE_ENV: production
+      LOG_LEVEL: info
       GATEWAY_PORT: 8080
       JWT_SECRET: ${JWT_SECRET:-dev_secret_change_me}
+      MESSAGE_SERVICE_URL: http://message-service:8090
       KAFKA_CLIENT_ID: gateway
       KAFKA_BROKERS: kafka:29092
       GATEWAY_EVENTS_GROUP: gateway-events-v1
       GATEWAY_PRESENCE_GROUP: gateway-presence-v1
+      GATEWAY_INSTANCE_ID: ${HOSTNAME:-gateway}
     expose:
       - "8080"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8080/ready | grep '\"ok\":true' > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
 
   gateway-lb:
     image: nginx:1.27-alpine
     depends_on:
-      - gateway
+      gateway:
+        condition: service_healthy
     ports:
       - "8080:8080"
     volumes:

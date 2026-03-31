@@ -13,6 +13,7 @@
   - `messages`
   - `events`
   - `presence`
+  - `dead_letters`
 - All message/event/presence publishes use `chat_id` as the Kafka key.
 - This preserves per-chat ordering within each topic partition while allowing independent chats to scale across partitions.
 
@@ -21,11 +22,13 @@
 - Consumers run with `autoCommit: false`.
 - Offsets are committed only after successful handler completion.
 - On handler failures, retry with bounded backoff before surfacing errors.
-- Poison payloads (invalid JSON) are logged and committed to avoid partition starvation.
+- Poison payloads are published to `dead_letters` and then committed to avoid partition starvation.
 
 ## Operational Considerations
 
 - For production, run Kafka with replication factor > 1 and multiple brokers.
 - Use sticky load balancing (or session affinity) for lower reconnect churn during gateway failover.
 - Add autoscaling based on WebSocket connections and consumer lag.
-- Enable centralized logging and metrics (consumer lag, publish latency, DB write latency, reconnect rate).
+- Keep readiness probes (`/ready`) in load balancer/service mesh routing decisions.
+- Tune gateway abuse controls (`GATEWAY_FRAME_RATE_LIMIT`, `GATEWAY_MAX_FRAME_BYTES`, `CHAT_MAX_MESSAGE_LENGTH`).
+- Enable centralized logging and metrics (consumer lag, publish latency, DB write latency, reconnect rate, DLQ growth).

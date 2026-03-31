@@ -8,8 +8,12 @@ Signal-inspired real-time distributed chat built with Node.js microservices, Web
 - Durable chat pipeline (`messages` topic) with PostgreSQL persistence.
 - Real-time fanout pipeline (`events` topic) for delivered messages, typing indicators, and read receipts.
 - Presence pipeline (`presence` topic) for online/offline updates.
+- Dead-letter pipeline (`dead_letters` topic) for malformed/failed payload triage.
 - Idempotent message and read-receipt writes.
 - RSA-OAEP key exchange and AES-256-GCM transport encryption between client and gateway.
+- Room history replay on join (`chat.history`) fetched from message-service.
+- Gateway frame-size + per-connection rate limiting to reduce abuse risk.
+- `/health` and `/ready` probes for gateway and message-service.
 - Horizontal gateway scaling support with load-balancer front door.
 
 ## Services
@@ -32,13 +36,19 @@ Signal-inspired real-time distributed chat built with Node.js microservices, Web
   - Producer: gateway
   - Consumer: gateway
   - Key: `chat_id` (keeps per-chat presence ordering)
+- `dead_letters`
+  - Producer: message-service (invalid/failed message/event processing)
+  - Consumer: ops tooling / replay jobs
+  - Key: `chat_id` when available
 
 ## Reliability Semantics
 
 - Consumers run with `autoCommit: false`.
 - Offsets are committed only after successful processing/fanout.
 - Handler retries use bounded backoff for transient failures.
-- Malformed payloads are logged and committed to prevent partition stalls.
+- Payload shape is validated before DB writes.
+- Malformed/invalid/failed payloads are published to `dead_letters` for audit and replay.
+- Malformed payloads are committed after DLQ publication to prevent partition stalls.
 
 ## Architecture Diagram (Text)
 
@@ -128,6 +138,18 @@ docker compose up --build -d --scale gateway=3 gateway message-service gateway-l
 ```
 
 Use `gateway-lb` endpoint (`http://localhost:8080`, `ws://localhost:8080/ws`) when scaled.
+
+## Operational Endpoints
+
+- Gateway
+  - `GET /health`
+  - `GET /ready`
+  - `GET /crypto/public-key`
+  - `GET /dev/token?user_id=<id>` (non-production only)
+- Message Service
+  - `GET /health`
+  - `GET /ready`
+  - `GET /messages?chat_id=<id>&limit=30&before=<iso>`
 
 ## Development Workflow
 
