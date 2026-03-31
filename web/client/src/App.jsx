@@ -14,6 +14,7 @@ export default function App() {
   const [status, setStatus] = useState('disconnected');
   const [messages, setMessages] = useState([]);
   const [typingUsers, setTypingUsers] = useState([]);
+  const [presenceByUser, setPresenceByUser] = useState({});
   const [readReceipts, setReadReceipts] = useState({});
   const [errors, setErrors] = useState([]);
 
@@ -93,6 +94,45 @@ export default function App() {
     }));
   }
 
+  function setPresenceFromJoined(payload) {
+    if (payload?.chat_id !== chatId) {
+      return;
+    }
+
+    const users = Array.isArray(payload.online_users) ? payload.online_users : [];
+    const nextState = {};
+    users.forEach((onlineUserId) => {
+      nextState[onlineUserId] = {
+        status: 'online',
+        updated_at: new Date().toISOString()
+      };
+    });
+
+    setPresenceByUser(nextState);
+  }
+
+  function updatePresence(payload) {
+    if (!payload?.user_id || payload.chat_id !== chatId) {
+      return;
+    }
+
+    setPresenceByUser((prev) => {
+      if (payload.status === 'offline') {
+        const next = { ...prev };
+        delete next[payload.user_id];
+        return next;
+      }
+
+      return {
+        ...prev,
+        [payload.user_id]: {
+          status: payload.status,
+          updated_at: payload.updated_at
+        }
+      };
+    });
+  }
+
   async function issueDevToken() {
     const response = await fetch(`${GATEWAY_HTTP}/dev/token?user_id=${encodeURIComponent(userId)}`);
     const data = await response.json();
@@ -136,6 +176,11 @@ export default function App() {
           return;
         }
 
+        if (frame.type === 'chat.joined') {
+          setPresenceFromJoined(frame.payload);
+          return;
+        }
+
         if (frame.type === 'chat.typing') {
           updateTypingState(frame.payload);
           return;
@@ -143,6 +188,11 @@ export default function App() {
 
         if (frame.type === 'chat.read') {
           updateReadReceipts(frame.payload);
+          return;
+        }
+
+        if (frame.type === 'presence.update') {
+          updatePresence(frame.payload);
           return;
         }
 
@@ -223,6 +273,19 @@ export default function App() {
     );
   }
 
+  function leaveRoom() {
+    if (status !== 'connected' || !socketRef.current) {
+      return;
+    }
+
+    socketRef.current.send(
+      JSON.stringify({
+        type: 'chat.leave',
+        payload: { chat_id: chatId }
+      })
+    );
+  }
+
   return (
     <main className="app">
       <section className="panel">
@@ -247,6 +310,7 @@ export default function App() {
           </button>
           <button type="button" onClick={connect}>Connect</button>
           <button type="button" onClick={joinRoom}>Join Room</button>
+          <button type="button" onClick={leaveRoom}>Leave Room</button>
         </div>
 
         <label>
@@ -268,6 +332,7 @@ export default function App() {
         ) : null}
 
         <p className="status">Connection: {status}</p>
+        <p className="status">Online in room: {Object.keys(presenceByUser).join(', ') || 'none'}</p>
       </section>
 
       <section className="panel stream">

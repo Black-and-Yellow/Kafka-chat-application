@@ -107,6 +107,51 @@ async function startEventConsumer(logger, handlers) {
   };
 }
 
+async function startPresenceConsumer(logger, handlers) {
+  const kafka = createKafka(logger);
+  const consumer = kafka.consumer({
+    groupId: process.env.GATEWAY_PRESENCE_GROUP || 'gateway-presence-v1'
+  });
+
+  await consumer.connect();
+  await consumer.subscribe({ topic: TOPICS.PRESENCE, fromBeginning: false });
+
+  await consumer.run({
+    autoCommit: false,
+    eachMessage: async ({ topic, partition, message }) => {
+      const value = message.value ? message.value.toString() : '{}';
+      const offset = message.offset;
+
+      let presencePayload;
+      try {
+        presencePayload = JSON.parse(value);
+      } catch (error) {
+        logger.error({ err: error, topic, partition, offset, value }, 'Invalid presence payload');
+        await consumer.commitOffsets([{ topic, partition, offset: String(Number(offset) + 1) }]);
+        return;
+      }
+
+      await handlers.onPresence(presencePayload, {
+        topic,
+        partition,
+        offset
+      });
+
+      // Offset handling: commit only after successful presence fanout.
+      await consumer.commitOffsets([{ topic, partition, offset: String(Number(offset) + 1) }]);
+    }
+  });
+
+  logger.info('Gateway presence consumer connected');
+
+  return {
+    consumer,
+    async disconnect() {
+      await consumer.disconnect();
+    }
+  };
+}
+
 async function publishChatMessage(producer, payload) {
   await producer.send({
     topic: TOPICS.MESSAGES,
@@ -142,10 +187,29 @@ async function publishEvent(producer, key, eventEnvelope) {
   });
 }
 
+async function publishPresenceEvent(producer, payload) {
+  await producer.send({
+    topic: TOPICS.PRESENCE,
+    messages: [
+      {
+        // Ordering guarantee: presence updates for a chat_id share one partition.
+        key: payload.chat_id,
+        value: JSON.stringify(payload),
+        headers: {
+          event_type: 'presence.update',
+          source: 'gateway'
+        }
+      }
+    ]
+  });
+}
+
 module.exports = {
   TOPICS,
   startKafkaProducer,
   startEventConsumer,
+  startPresenceConsumer,
   publishChatMessage,
-  publishEvent
+  publishEvent,
+  publishPresenceEvent
 };

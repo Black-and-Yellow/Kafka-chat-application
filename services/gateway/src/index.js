@@ -6,7 +6,14 @@ const pino = require('pino');
 const { randomUUID } = require('crypto');
 const { extractToken, verifyToken } = require('./auth');
 const { SessionStore } = require('./sessionStore');
-const { startKafkaProducer, startEventConsumer, publishChatMessage, publishEvent } = require('./kafka');
+const {
+	startKafkaProducer,
+	startEventConsumer,
+	startPresenceConsumer,
+	publishChatMessage,
+	publishEvent,
+	publishPresenceEvent
+} = require('./kafka');
 
 dotenv.config();
 
@@ -18,6 +25,7 @@ const { WebSocketServer } = WebSocket;
 const sessionStore = new SessionStore();
 let kafkaRuntime;
 let eventConsumerRuntime;
+let presenceConsumerRuntime;
 
 function sendJson(socket, body) {
 	if (socket.readyState === WebSocket.OPEN) {
@@ -75,6 +83,41 @@ function fanoutEventToRoom(eventType, payload) {
 	);
 }
 
+function fanoutPresenceToRoom(payload) {
+	const roomSockets = sessionStore.getSocketsForRoom(payload.chat_id);
+
+	for (const clientSocket of roomSockets) {
+		sendJson(clientSocket, {
+			type: 'presence.update',
+			payload
+		});
+	}
+
+	logger.info(
+		{
+			chatId: payload.chat_id,
+			userId: payload.user_id,
+			status: payload.status,
+			fanout: roomSockets.size
+		},
+		'Fanout presence update to room sockets'
+	);
+}
+
+async function emitPresenceUpdate(chatId, userId, status) {
+	if (!kafkaRuntime) {
+		logger.warn({ chatId, userId, status }, 'Skipping presence update because Kafka is unavailable');
+		return;
+	}
+
+	await publishPresenceEvent(kafkaRuntime.producer, {
+		chat_id: chatId,
+		user_id: userId,
+		status,
+		updated_at: new Date().toISOString()
+	});
+}
+
 async function handleClientFrame(socket, rawFrame) {
 	let frame;
 
@@ -98,9 +141,50 @@ async function handleClientFrame(socket, rawFrame) {
 			return;
 		}
 
-		sessionStore.joinRoom(socket, chatId);
+		const joinState = sessionStore.joinRoom(socket, chatId);
+
+		if (joinState.joined && joinState.becameOnline) {
+			try {
+				await emitPresenceUpdate(chatId, session.userId, 'online');
+			} catch (error) {
+				logger.error({ err: error, chatId, userId: session.userId }, 'Presence online publish failed');
+			}
+		}
+
 		sendJson(socket, {
 			type: 'chat.joined',
+			payload: {
+				chat_id: chatId,
+				user_id: session.userId,
+				online_users: sessionStore.getOnlineUsersForRoom(chatId)
+			}
+		});
+		return;
+	}
+
+	if (frame.type === 'chat.leave') {
+		const chatId = frame.payload?.chat_id;
+		if (!chatId) {
+			sendError(socket, 'INVALID_CHAT', 'chat_id is required');
+			return;
+		}
+
+		const leaveState = sessionStore.leaveRoom(socket, chatId);
+		if (!leaveState.left) {
+			sendError(socket, 'NOT_IN_CHAT', 'Socket is not currently joined to chat_id');
+			return;
+		}
+
+		if (leaveState.becameOffline) {
+			try {
+				await emitPresenceUpdate(chatId, session.userId, 'offline');
+			} catch (error) {
+				logger.error({ err: error, chatId, userId: session.userId }, 'Presence offline publish failed');
+			}
+		}
+
+		sendJson(socket, {
+			type: 'chat.left',
 			payload: {
 				chat_id: chatId,
 				user_id: session.userId
@@ -312,7 +396,23 @@ wss.on('connection', (socket, request, identity) => {
 	});
 
 	socket.on('close', () => {
-		sessionStore.remove(socket);
+		const removalState = sessionStore.remove(socket);
+		if (!removalState || !kafkaRuntime) {
+			return;
+		}
+
+		for (const presenceEvent of removalState.presenceEvents) {
+			if (!presenceEvent.becameOffline) {
+				continue;
+			}
+
+			emitPresenceUpdate(presenceEvent.chatId, presenceEvent.userId, 'offline').catch((error) => {
+				logger.error(
+					{ err: error, chatId: presenceEvent.chatId, userId: presenceEvent.userId },
+					'Presence offline publish failed on socket close'
+				);
+			});
+		}
 	});
 
 	logger.info({ userId: identity.userId }, 'WebSocket session connected');
@@ -370,6 +470,12 @@ async function start() {
 		}
 	});
 
+	presenceConsumerRuntime = await startPresenceConsumer(logger, {
+		async onPresence(payload) {
+			fanoutPresenceToRoom(payload);
+		}
+	});
+
 	httpServer.listen(port, () => {
 		logger.info({ port }, 'Gateway is listening');
 	});
@@ -386,6 +492,10 @@ async function shutdown(signal) {
 
 	if (eventConsumerRuntime) {
 		await eventConsumerRuntime.disconnect();
+	}
+
+	if (presenceConsumerRuntime) {
+		await presenceConsumerRuntime.disconnect();
 	}
 
 	process.exit(0);

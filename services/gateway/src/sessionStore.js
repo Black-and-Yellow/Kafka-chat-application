@@ -2,6 +2,7 @@ class SessionStore {
   constructor() {
     this.sessions = new Map();
     this.rooms = new Map();
+    this.roomUserCounts = new Map();
   }
 
   add(socket, userId) {
@@ -14,20 +15,46 @@ class SessionStore {
   remove(socket) {
     const session = this.sessions.get(socket);
     if (!session) {
-      return;
+      return null;
     }
 
-    for (const chatId of session.chats) {
-      this.leaveRoom(socket, chatId);
+    const presenceEvents = [];
+
+    for (const chatId of Array.from(session.chats)) {
+      const leaveState = this.leaveRoom(socket, chatId);
+      if (leaveState.left) {
+        presenceEvents.push({
+          chatId,
+          userId: session.userId,
+          becameOffline: leaveState.becameOffline
+        });
+      }
     }
 
     this.sessions.delete(socket);
+
+    return {
+      userId: session.userId,
+      presenceEvents
+    };
   }
 
   joinRoom(socket, chatId) {
     const session = this.sessions.get(socket);
     if (!session) {
-      return false;
+      return {
+        joined: false,
+        becameOnline: false,
+        userId: null
+      };
+    }
+
+    if (session.chats.has(chatId)) {
+      return {
+        joined: false,
+        becameOnline: false,
+        userId: session.userId
+      };
     }
 
     session.chats.add(chatId);
@@ -37,24 +64,64 @@ class SessionStore {
     }
 
     this.rooms.get(chatId).add(socket);
-    return true;
+
+    if (!this.roomUserCounts.has(chatId)) {
+      this.roomUserCounts.set(chatId, new Map());
+    }
+
+    const userCounts = this.roomUserCounts.get(chatId);
+    const currentCount = userCounts.get(session.userId) || 0;
+    userCounts.set(session.userId, currentCount + 1);
+
+    return {
+      joined: true,
+      becameOnline: currentCount === 0,
+      userId: session.userId
+    };
   }
 
   leaveRoom(socket, chatId) {
     const session = this.sessions.get(socket);
-    if (session) {
-      session.chats.delete(chatId);
+    if (!session || !session.chats.has(chatId)) {
+      return {
+        left: false,
+        becameOffline: false,
+        userId: session ? session.userId : null
+      };
     }
+
+    session.chats.delete(chatId);
 
     const room = this.rooms.get(chatId);
-    if (!room) {
-      return;
+    if (room) {
+      room.delete(socket);
+      if (room.size === 0) {
+        this.rooms.delete(chatId);
+      }
     }
 
-    room.delete(socket);
-    if (room.size === 0) {
-      this.rooms.delete(chatId);
+    let becameOffline = false;
+    const userCounts = this.roomUserCounts.get(chatId);
+    if (userCounts) {
+      const currentCount = userCounts.get(session.userId) || 0;
+      const nextCount = Math.max(0, currentCount - 1);
+      if (nextCount === 0) {
+        userCounts.delete(session.userId);
+        becameOffline = currentCount > 0;
+      } else {
+        userCounts.set(session.userId, nextCount);
+      }
+
+      if (userCounts.size === 0) {
+        this.roomUserCounts.delete(chatId);
+      }
     }
+
+    return {
+      left: true,
+      becameOffline,
+      userId: session.userId
+    };
   }
 
   getSession(socket) {
@@ -63,6 +130,15 @@ class SessionStore {
 
   getSocketsForRoom(chatId) {
     return this.rooms.get(chatId) || new Set();
+  }
+
+  getOnlineUsersForRoom(chatId) {
+    const userCounts = this.roomUserCounts.get(chatId);
+    if (!userCounts) {
+      return [];
+    }
+
+    return Array.from(userCounts.keys());
   }
 }
 
