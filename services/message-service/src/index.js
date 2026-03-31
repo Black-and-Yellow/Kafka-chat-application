@@ -2,6 +2,7 @@ const dotenv = require('dotenv');
 const pino = require('pino');
 const { createServer } = require('http');
 const { startMessageConsumer } = require('./kafkaConsumer');
+const { migrate, saveMessage, closePool } = require('./db');
 
 dotenv.config();
 
@@ -23,8 +24,25 @@ const server = createServer((req, res) => {
 });
 
 async function start() {
+	await migrate(logger);
+
 	kafkaRuntime = await startMessageConsumer(logger, {
 		async onMessage(payload, meta) {
+			const writeResult = await saveMessage(logger, payload);
+
+			if (!writeResult.inserted) {
+				logger.warn(
+					{
+						chatId: payload.chat_id,
+						messageId: payload.message_id,
+						userId: payload.user_id,
+						meta
+					},
+					'Duplicate message ignored by idempotency check'
+				);
+				return;
+			}
+
 			logger.info(
 				{
 					meta,
@@ -49,6 +67,8 @@ async function shutdown(signal) {
 	if (kafkaRuntime) {
 		await kafkaRuntime.disconnect();
 	}
+
+	await closePool();
 
 	process.exit(0);
 }
