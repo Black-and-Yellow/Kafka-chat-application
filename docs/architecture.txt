@@ -1,0 +1,25 @@
++--------------------+          ws/http          +-------------------------+
+|   React Client     | <-----------------------> |   Gateway Service       |
+| (Vite, browser)    |                           | (JWT, WebSocket, Kafka) |
++--------------------+                           +-----------+-------------+
+                                                             |
+               +---------------------------------------------+---------------------------------------------+
+               |                                                                                           |
+        produce messages/events/presence                                                            consume events/presence
+               |                                                                                           |
+               v                                                                                           v
+       +--------------------+                                                                   +--------------------+
+       |     Kafka          | <-------------------- produce deliver events ---------------------- |  Message Service   |
+       | topics:            |                                                                   | (consume messages, |
+       | messages/events/   | -------------------- consume messages/events --------------------> | persist, publish)  |
+       | presence           |                                                                   +---------+----------+
+       +--------------------+                                                                             |
+                                                                                                           |
+                                                                                                  write idempotent rows
+                                                                                                           |
+                                                                                                           v
+                                                                                                   +---------------+
+                                                                                                   |  PostgreSQL   |
+                                                                                                   | messages,     |
+                                                                                                   | read_receipts |
+                                                                                                   +---------------+
