@@ -2,6 +2,23 @@ const { Kafka, logLevel } = require('kafkajs');
 
 const TOPIC_EVENTS = 'events';
 
+function nextOffset(offset) {
+  return (BigInt(offset) + 1n).toString();
+}
+
+function isNonEmptyString(value) {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isValidEventEnvelope(eventEnvelope) {
+  return (
+    eventEnvelope &&
+    isNonEmptyString(eventEnvelope.type) &&
+    typeof eventEnvelope.payload === 'object' &&
+    eventEnvelope.payload !== null
+  );
+}
+
 function parseBrokers() {
   const raw = process.env.KAFKA_BROKERS || 'localhost:9092';
   return raw
@@ -46,25 +63,79 @@ async function startEventsConsumer(logger, handlers) {
         eventEnvelope = JSON.parse(value);
       } catch (error) {
         logger.error({ err: error, topic, partition, offset, value }, 'Dropping malformed event payload');
-        await consumer.commitOffsets([{ topic, partition, offset: String(Number(offset) + 1) }]);
+
+        if (handlers.onMalformedEvent) {
+          await handlers.onMalformedEvent(
+            {
+              raw: value,
+              reason: 'invalid-json'
+            },
+            {
+              topic,
+              partition,
+              offset,
+              source
+            }
+          );
+        }
+
+        await consumer.commitOffsets([{ topic, partition, offset: nextOffset(offset) }]);
+        return;
+      }
+
+      if (!isValidEventEnvelope(eventEnvelope)) {
+        logger.warn({ topic, partition, offset, eventEnvelope }, 'Dropping invalid event envelope shape');
+
+        if (handlers.onInvalidEvent) {
+          await handlers.onInvalidEvent(eventEnvelope, {
+            topic,
+            partition,
+            offset,
+            source,
+            reason: 'invalid-envelope-shape'
+          });
+        }
+
+        await consumer.commitOffsets([{ topic, partition, offset: nextOffset(offset) }]);
         return;
       }
 
       // Ignore self-generated delivery events and process only relevant upstream events.
       if (source !== 'gateway') {
-        await consumer.commitOffsets([{ topic, partition, offset: String(Number(offset) + 1) }]);
+        await consumer.commitOffsets([{ topic, partition, offset: nextOffset(offset) }]);
         return;
       }
 
-      await handlers.onEvent(eventEnvelope, {
-        topic,
-        partition,
-        offset,
-        source
-      });
+      try {
+        await handlers.onEvent(eventEnvelope, {
+          topic,
+          partition,
+          offset,
+          source
+        });
+      } catch (error) {
+        logger.error({ err: error, topic, partition, offset, source }, 'Event handler failed');
+
+        if (handlers.onProcessingFailure) {
+          await handlers.onProcessingFailure(
+            eventEnvelope,
+            {
+            topic,
+            partition,
+            offset,
+            source,
+            reason: 'handler-failed'
+            },
+            error
+          );
+        }
+
+        await consumer.commitOffsets([{ topic, partition, offset: nextOffset(offset) }]);
+        return;
+      }
 
       // Offset handling: commit after successful processing to preserve at-least-once semantics.
-      await consumer.commitOffsets([{ topic, partition, offset: String(Number(offset) + 1) }]);
+      await consumer.commitOffsets([{ topic, partition, offset: nextOffset(offset) }]);
     }
   });
 

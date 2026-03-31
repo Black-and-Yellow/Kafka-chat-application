@@ -138,6 +138,43 @@ async function saveReadReceipt(logger, receipt) {
   };
 }
 
+async function listMessagesByChat(logger, options) {
+  const chatId = options.chatId;
+  const limit = options.limit;
+  const before = options.before;
+
+  const values = [chatId, limit];
+  let beforeClause = '';
+  if (before) {
+    values.push(before);
+    beforeClause = 'AND created_at < $3';
+  }
+
+  const query = {
+    text: `
+      SELECT message_id, chat_id, user_id, body_text AS text, created_at
+      FROM messages
+      WHERE chat_id = $1
+      ${beforeClause}
+      ORDER BY created_at DESC
+      LIMIT $2;
+    `,
+    values
+  };
+
+  const result = await withRetry(
+    async () => pool.query(query),
+    logger,
+    'list-messages-by-chat'
+  );
+
+  return result.rows;
+}
+
+async function pingDb() {
+  await pool.query('SELECT 1');
+}
+
 async function closePool() {
   await pool.end();
 }
@@ -146,5 +183,7 @@ module.exports = {
   migrate,
   saveMessage,
   saveReadReceipt,
+  listMessagesByChat,
+  pingDb,
   closePool
 };
