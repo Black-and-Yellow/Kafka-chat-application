@@ -22,6 +22,16 @@ Signal-inspired real-time distributed chat built with Node.js microservices, Web
 - `services/message-service`: Kafka consumers, PostgreSQL persistence, delivery event publisher.
 - `web/client`: React + Vite client for chat UX, typing, read receipts, and encrypted transport.
 
+## Client Authentication UX
+
+- The client now starts with a dedicated login page.
+- Supported sign-in paths:
+  - Email/password via Firebase Auth REST APIs.
+  - Gmail OAuth via Google OAuth token flow and Firebase `signInWithIdp`.
+- Paste your Firebase Web API key in the login form.
+- For Gmail OAuth, also provide a Google OAuth Client ID.
+- After successful login, the client auto-requests a gateway dev token and prepares socket connection.
+
 ## Kafka Topic Design
 
 - `messages`
@@ -145,7 +155,7 @@ Use `gateway-lb` endpoint (`http://localhost:8080`, `ws://localhost:8080/ws`) wh
   - `GET /health`
   - `GET /ready`
   - `GET /crypto/public-key`
-  - `GET /dev/token?user_id=<id>` (non-production only)
+  - `GET /dev/token?user_id=<id>&name=<displayName>` (non-production only)
 - Message Service
   - `GET /health`
   - `GET /ready`

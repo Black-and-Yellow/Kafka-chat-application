@@ -572,12 +572,21 @@ const httpServer = createServer((req, res) => {
 
 	if (url.pathname === '/dev/token' && nodeEnv !== 'production') {
 		const userId = url.searchParams.get('user_id');
+		const displayName = url.searchParams.get('name');
 		if (!userId) {
 			sendHttpJson(res, 400, { error: 'user_id query param is required' });
 			return;
 		}
 
-		const token = jwt.sign({ user_id: userId }, jwtSecret, { expiresIn: '12h' });
+		const claims = {
+			user_id: userId
+		};
+
+		if (displayName && displayName.trim()) {
+			claims.name = displayName.trim();
+		}
+
+		const token = jwt.sign(claims, jwtSecret, { expiresIn: '12h' });
 		sendHttpJson(res, 200, { token });
 		return;
 	}
