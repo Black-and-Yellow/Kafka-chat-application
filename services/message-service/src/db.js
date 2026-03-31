@@ -59,6 +59,22 @@ async function migrate(logger) {
         CREATE INDEX IF NOT EXISTS idx_messages_chat_created
           ON messages (chat_id, created_at DESC);
       `);
+
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS read_receipts (
+          chat_id TEXT NOT NULL,
+          message_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          read_at TIMESTAMPTZ NOT NULL,
+          received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          PRIMARY KEY (chat_id, message_id, user_id)
+        );
+      `);
+
+      await pool.query(`
+        CREATE INDEX IF NOT EXISTS idx_read_receipts_message
+          ON read_receipts (message_id, read_at DESC);
+      `);
     },
     logger,
     'migrate'
@@ -95,6 +111,33 @@ async function saveMessage(logger, message) {
   };
 }
 
+async function saveReadReceipt(logger, receipt) {
+  const query = {
+    text: `
+      INSERT INTO read_receipts (chat_id, message_id, user_id, read_at)
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (chat_id, message_id, user_id) DO NOTHING
+      RETURNING message_id;
+    `,
+    values: [
+      receipt.chat_id,
+      receipt.message_id,
+      receipt.user_id,
+      new Date(receipt.read_at)
+    ]
+  };
+
+  const result = await withRetry(
+    async () => pool.query(query),
+    logger,
+    'save-read-receipt'
+  );
+
+  return {
+    inserted: result.rowCount === 1
+  };
+}
+
 async function closePool() {
   await pool.end();
 }
@@ -102,5 +145,6 @@ async function closePool() {
 module.exports = {
   migrate,
   saveMessage,
+  saveReadReceipt,
   closePool
 };

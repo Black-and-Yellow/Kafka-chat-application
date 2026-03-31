@@ -6,7 +6,7 @@ const pino = require('pino');
 const { randomUUID } = require('crypto');
 const { extractToken, verifyToken } = require('./auth');
 const { SessionStore } = require('./sessionStore');
-const { startKafkaProducer, startEventConsumer, publishChatMessage } = require('./kafka');
+const { startKafkaProducer, startEventConsumer, publishChatMessage, publishEvent } = require('./kafka');
 
 dotenv.config();
 
@@ -52,6 +52,26 @@ function deliverMessageToRoom(payload) {
 			fanout: roomSockets.size
 		},
 		'Delivered persisted message to active room sockets'
+	);
+}
+
+function fanoutEventToRoom(eventType, payload) {
+	const roomSockets = sessionStore.getSocketsForRoom(payload.chat_id);
+
+	for (const clientSocket of roomSockets) {
+		sendJson(clientSocket, {
+			type: eventType,
+			payload
+		});
+	}
+
+	logger.info(
+		{
+			eventType,
+			chatId: payload.chat_id,
+			fanout: roomSockets.size
+		},
+		'Fanout event to room sockets'
 	);
 }
 
@@ -141,6 +161,96 @@ async function handleClientFrame(socket, rawFrame) {
 			},
 			'Queued message to Kafka messages topic'
 		);
+		return;
+	}
+
+	if (frame.type === 'chat.typing') {
+		const chatId = frame.payload?.chat_id;
+		const isTyping = frame.payload?.is_typing;
+
+		if (!chatId || typeof isTyping !== 'boolean') {
+			sendError(socket, 'INVALID_TYPING_EVENT', 'chat_id and boolean is_typing are required');
+			return;
+		}
+
+		if (!session.chats.has(chatId)) {
+			sessionStore.joinRoom(socket, chatId);
+		}
+
+		if (!kafkaRuntime) {
+			sendError(socket, 'KAFKA_UNAVAILABLE', 'Kafka producer is not connected');
+			return;
+		}
+
+		try {
+			await publishEvent(kafkaRuntime.producer, chatId, {
+				type: 'chat.typing',
+				payload: {
+					chat_id: chatId,
+					user_id: session.userId,
+					is_typing: isTyping,
+					updated_at: new Date().toISOString()
+				}
+			});
+		} catch (error) {
+			logger.error({ err: error, chatId, userId: session.userId }, 'Typing event publish failed');
+			sendError(socket, 'EVENT_PUBLISH_FAILED', 'Unable to queue typing event');
+			return;
+		}
+
+		sendJson(socket, {
+			type: 'event.ack',
+			payload: {
+				event_type: 'chat.typing',
+				chat_id: chatId,
+				status: 'queued'
+			}
+		});
+		return;
+	}
+
+	if (frame.type === 'chat.read') {
+		const chatId = frame.payload?.chat_id;
+		const messageId = frame.payload?.message_id;
+
+		if (!chatId || !messageId) {
+			sendError(socket, 'INVALID_READ_RECEIPT', 'chat_id and message_id are required');
+			return;
+		}
+
+		if (!session.chats.has(chatId)) {
+			sessionStore.joinRoom(socket, chatId);
+		}
+
+		if (!kafkaRuntime) {
+			sendError(socket, 'KAFKA_UNAVAILABLE', 'Kafka producer is not connected');
+			return;
+		}
+
+		try {
+			await publishEvent(kafkaRuntime.producer, chatId, {
+				type: 'chat.read',
+				payload: {
+					chat_id: chatId,
+					message_id: messageId,
+					user_id: session.userId,
+					read_at: new Date().toISOString()
+				}
+			});
+		} catch (error) {
+			logger.error({ err: error, chatId, userId: session.userId }, 'Read receipt publish failed');
+			sendError(socket, 'EVENT_PUBLISH_FAILED', 'Unable to queue read receipt');
+			return;
+		}
+
+		sendJson(socket, {
+			type: 'event.ack',
+			payload: {
+				event_type: 'chat.read',
+				chat_id: chatId,
+				status: 'queued'
+			}
+		});
 		return;
 	}
 
@@ -249,11 +359,14 @@ async function start() {
 
 	eventConsumerRuntime = await startEventConsumer(logger, {
 		async onEvent(eventEnvelope) {
-			if (eventEnvelope.type !== 'chat.deliver') {
+			if (eventEnvelope.type === 'chat.deliver') {
+				deliverMessageToRoom(eventEnvelope.payload);
 				return;
 			}
 
-			deliverMessageToRoom(eventEnvelope.payload);
+			if (eventEnvelope.type === 'chat.typing' || eventEnvelope.type === 'chat.read') {
+				fanoutEventToRoom(eventEnvelope.type, eventEnvelope.payload);
+			}
 		}
 	});
 

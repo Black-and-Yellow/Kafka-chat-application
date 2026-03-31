@@ -2,8 +2,9 @@ const dotenv = require('dotenv');
 const pino = require('pino');
 const { createServer } = require('http');
 const { startMessageConsumer } = require('./kafkaConsumer');
-const { migrate, saveMessage, closePool } = require('./db');
+const { migrate, saveMessage, saveReadReceipt, closePool } = require('./db');
 const { startEventPublisher, publishDeliverEvent } = require('./eventPublisher');
+const { startEventsConsumer } = require('./eventsConsumer');
 
 dotenv.config();
 
@@ -11,6 +12,7 @@ const logger = pino({ name: 'message-service' });
 const port = Number(process.env.MESSAGE_SERVICE_PORT || 8090);
 let kafkaRuntime;
 let publisherRuntime;
+let eventsRuntime;
 
 const server = createServer((req, res) => {
 	const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
@@ -29,6 +31,57 @@ async function start() {
 	await migrate(logger);
 
 	publisherRuntime = await startEventPublisher(logger);
+
+	eventsRuntime = await startEventsConsumer(logger, {
+		async onEvent(eventEnvelope, meta) {
+			if (eventEnvelope.type === 'chat.typing') {
+				logger.debug(
+					{
+						chatId: eventEnvelope.payload?.chat_id,
+						userId: eventEnvelope.payload?.user_id,
+						isTyping: eventEnvelope.payload?.is_typing,
+						meta
+					},
+					'Received typing event'
+				);
+				return;
+			}
+
+			if (eventEnvelope.type !== 'chat.read') {
+				return;
+			}
+
+			const payload = eventEnvelope.payload || {};
+			if (!payload.chat_id || !payload.message_id || !payload.user_id || !payload.read_at) {
+				logger.warn({ payload, meta }, 'Skipping invalid read receipt payload');
+				return;
+			}
+
+			const writeResult = await saveReadReceipt(logger, payload);
+			if (!writeResult.inserted) {
+				logger.warn(
+					{
+						chatId: payload.chat_id,
+						messageId: payload.message_id,
+						userId: payload.user_id,
+						meta
+					},
+					'Duplicate read receipt ignored by idempotency check'
+				);
+				return;
+			}
+
+			logger.info(
+				{
+					chatId: payload.chat_id,
+					messageId: payload.message_id,
+					userId: payload.user_id,
+					meta
+				},
+				'Persisted read receipt'
+			);
+		}
+	});
 
 	kafkaRuntime = await startMessageConsumer(logger, {
 		async onMessage(payload, meta) {
@@ -72,6 +125,10 @@ async function shutdown(signal) {
 
 	if (kafkaRuntime) {
 		await kafkaRuntime.disconnect();
+	}
+
+	if (eventsRuntime) {
+		await eventsRuntime.disconnect();
 	}
 
 	if (publisherRuntime) {

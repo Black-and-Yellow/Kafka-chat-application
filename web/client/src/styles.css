@@ -92,6 +92,12 @@ button:disabled {
   font-weight: 700;
 }
 
+.typing {
+  margin: 0.5rem 0 0;
+  color: #314b72;
+  font-style: italic;
+}
+
 .message {
   border: 1px solid rgba(22, 37, 61, 0.14);
   border-radius: 14px;
@@ -109,6 +115,20 @@ button:disabled {
 
 .message p {
   margin: 0;
+}
+
+.message footer {
+  margin-top: 0.5rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+}
+
+.message footer button {
+  padding: 0.3rem 0.55rem;
+  font-size: 0.8rem;
 }
 
 .error-item {

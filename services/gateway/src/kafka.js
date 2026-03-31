@@ -125,9 +125,27 @@ async function publishChatMessage(producer, payload) {
   });
 }
 
+async function publishEvent(producer, key, eventEnvelope) {
+  await producer.send({
+    topic: TOPICS.EVENTS,
+    messages: [
+      {
+        // Ordering guarantee: event stream for a chat_id stays ordered per partition.
+        key,
+        value: JSON.stringify(eventEnvelope),
+        headers: {
+          event_type: eventEnvelope.type,
+          source: 'gateway'
+        }
+      }
+    ]
+  });
+}
+
 module.exports = {
   TOPICS,
   startKafkaProducer,
   startEventConsumer,
-  publishChatMessage
+  publishChatMessage,
+  publishEvent
 };
