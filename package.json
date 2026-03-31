@@ -12,7 +12,12 @@
     "dev:gateway": "npm --workspace services/gateway run dev",
     "dev:message": "npm --workspace services/message-service run dev",
     "dev:client": "npm --workspace web/client run dev",
-    "build:client": "npm --workspace web/client run build"
+    "build:client": "npm --workspace web/client run build",
+    "docker:infra": "docker compose up -d zookeeper kafka postgres",
+    "docker:up": "docker compose up --build -d",
+    "docker:scale-gateway": "docker compose up --build -d --scale gateway=3 gateway message-service gateway-lb",
+    "docker:logs:gateway": "docker compose logs -f gateway",
+    "docker:logs:message": "docker compose logs -f message-service"
   },
   "devDependencies": {
     "concurrently": "^9.0.1"
