@@ -122,6 +122,13 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    setMessages([]);
+    setTypingUsers([]);
+    setReadReceipts({});
+    setPresenceByUser({});
+  }, [chatId]);
+
   function sendTypingEvent(isTyping) {
     if (status !== 'connected' || !socketRef.current) {
       return;
@@ -333,6 +340,10 @@ export default function App() {
         const frame = JSON.parse(event.data);
 
         if (frame.type === 'chat.message') {
+          if (frame.payload?.chat_id !== chatId) {
+            return;
+          }
+
           const normalizedPayload = await normalizeInboundMessage(frame.payload);
           setMessages((prev) => [normalizedPayload, ...prev].slice(0, 50));
           return;
