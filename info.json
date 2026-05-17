@@ -1,0 +1,20 @@
+{
+  "name": "Kafka Chat Application",
+  "description": "Engineered a Signal-inspired real-time distributed chat application with highly durable message pipelines.\nImplemented using Node.js microservices, WebSockets, Kafka, PostgreSQL, and AES-256-GCM transport encryption.\nAchieved reliable delivery semantics with idempotent writes, dead-letter queues, and horizontally scalable gateways.",
+  "github": "https://github.com/Black-and-Yellow/Kafka-chat-application",
+  "live": "",
+  "techStack": [
+    "Node.js",
+    "Kafka",
+    "React",
+    "PostgreSQL",
+    "Docker",
+    "WebSockets"
+  ],
+  "featured": true,
+  "thumbnail": "",
+  "status": "Completed",
+  "category": "Full Stack",
+  "date": "2025",
+  "gradient": "from-orange-500/20 to-red-600/5"
+}
