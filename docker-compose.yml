@@ -125,5 +125,45 @@ services:
       - ./infra/nginx/gateway.conf:/etc/nginx/conf.d/default.conf:ro
     restart: unless-stopped
 
+  redis:
+    image: redis:7-alpine
+    container_name: chat-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  dlq-worker:
+    build:
+      context: .
+      dockerfile: services/dlq-worker/Dockerfile
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: info
+      DLQ_WORKER_PORT: 8095
+      KAFKA_CLIENT_ID: dlq-worker
+      KAFKA_BROKERS: kafka:29092
+      DLQ_CONSUMER_GROUP: dlq-worker-v1
+      DLQ_MAX_RETRIES: 3
+    expose:
+      - "8095"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8095/ready | grep '\"ok\":true' > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
 volumes:
   pgdata:
+  redisdata:

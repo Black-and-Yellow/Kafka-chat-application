@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-chat-config
+  namespace: kafka-chat
+data:
+  NODE_ENV: "production"
+  LOG_LEVEL: "info"
+  KAFKA_BROKERS: "kafka.kafka-chat.svc.cluster.local:9092"
+  POSTGRES_HOST: "postgres.kafka-chat.svc.cluster.local"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "chatdb"
+  MESSAGE_SERVICE_URL: "http://message-service.kafka-chat.svc.cluster.local:8090"
+  CHAT_HISTORY_LIMIT: "30"
+  CHAT_MAX_MESSAGE_LENGTH: "4000"
+  GATEWAY_MAX_FRAME_BYTES: "32768"
+  GATEWAY_FRAME_RATE_WINDOW_MS: "60000"
+  GATEWAY_FRAME_RATE_LIMIT: "120"
+  MESSAGE_CONSUMER_GROUP: "message-service-v1"
+  EVENTS_CONSUMER_GROUP: "message-events-v1"
+  GATEWAY_EVENTS_GROUP: "gateway-events-v1"
+  GATEWAY_PRESENCE_GROUP: "gateway-presence-v1"
+  POSTGRES_POOL_MAX: "10"
+  DLQ_CONSUMER_GROUP: "dlq-worker-v1"
+  DLQ_MAX_RETRIES: "3"

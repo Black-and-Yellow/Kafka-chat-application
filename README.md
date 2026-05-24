@@ -1,176 +1,155 @@
-# Kafka Chat Application
+# KafkaChat — Distributed Realtime Messaging Platform
 
-Signal-inspired real-time distributed chat built with Node.js microservices, WebSockets, Kafka, React, and Docker Compose.
+Production-grade realtime chat built with Node.js microservices, Apache Kafka, WebSockets, PostgreSQL, React, and Docker Compose.
+
+## Architecture
+
+```text
+┌──────────────┐     ws/http     ┌───────────────────┐
+│ React Client │ ◄─────────────► │  Gateway Service   │
+│ (Vite, SPA)  │                 │ (JWT, WS, Kafka)   │
+└──────────────┘                 └─────────┬─────────┘
+                                           │
+        ┌──────────────────────────────────┼───────────────────────────┐
+        │ produce msgs/events/presence     │            consume events/presence
+        ▼                                  │                          ▼
+┌──────────────┐                   ┌───────┴──────┐         ┌──────────────┐
+│  Apache Kafka │ ◄── deliver ──── │   Message    │         │  DLQ Worker  │
+│  4 topics     │ ── consume ────► │   Service    │         │  (retry/audit)│
+└──────────────┘                   └──────┬───────┘         └──────────────┘
+                                          │
+                                  idempotent writes
+                                          ▼
+                                  ┌──────────────┐
+                                  │  PostgreSQL   │
+                                  │  messages,    │
+                                  │  read_receipts│
+                                  └──────────────┘
+```
 
 ## Features
 
-- WebSocket gateway with JWT authentication.
-- Durable chat pipeline (`messages` topic) with PostgreSQL persistence.
-- Real-time fanout pipeline (`events` topic) for delivered messages, typing indicators, and read receipts.
-- Presence pipeline (`presence` topic) for online/offline updates.
-- Dead-letter pipeline (`dead_letters` topic) for malformed/failed payload triage.
-- Idempotent message and read-receipt writes.
-- RSA-OAEP key exchange and AES-256-GCM transport encryption between client and gateway.
-- Room history replay on join (`chat.history`) fetched from message-service.
-- Gateway frame-size + per-connection rate limiting to reduce abuse risk.
-- `/health` and `/ready` probes for gateway and message-service.
-- Horizontal gateway scaling support with load-balancer front door.
+### Messaging
+- WebSocket gateway with JWT authentication
+- Durable chat pipeline (`messages` topic) with PostgreSQL persistence
+- Real-time fanout pipeline (`events` topic) for delivered messages, typing indicators, and read receipts
+- Presence pipeline (`presence` topic) for online/offline updates
+- Idempotent message and read-receipt writes
+
+### Security
+- RSA-OAEP key exchange and AES-256-GCM transport encryption
+- Per-connection rate limiting and frame-size limits
+- See [Security Model](docs/security-model.md) for full threat model
+
+### Reliability
+- Dead-letter pipeline with DLQ worker (retry, audit, stats)
+- Manual offset commits for at-least-once delivery
+- Bounded backoff retry for transient failures
+- Health and readiness probes on all services
+- Graceful shutdown with signal handlers
+
+### Scaling
+- Horizontal gateway scaling with per-instance consumer groups
+- Nginx load balancer for gateway instances
+- Kubernetes deployment configs with HPA autoscaling
+- Redis ready for session store migration
+
+### Frontend
+- Professional landing page with live architecture visualization
+- Interactive architecture explorer (click components for details)
+- Live system metrics from gateway health endpoint
+- Modern design system (Inter font, zinc palette, 8px grid)
+- Component-based React architecture (15+ focused components)
+- Auto-reconnect with exponential backoff
+- Skeleton loading states
+- Read receipts (✓ ✓✓) and typing indicators
 
 ## Services
 
-- `services/gateway`: WebSocket/HTTP gateway, auth, Kafka producer/consumers, session tracking.
-- `services/message-service`: Kafka consumers, PostgreSQL persistence, delivery event publisher.
-- `web/client`: React + Vite client for chat UX, typing, read receipts, and encrypted transport.
-
-## Client Authentication UX
-
-- The client now starts with a dedicated login page.
-- Supported sign-in paths:
-  - Email/password via Firebase Auth REST APIs.
-  - Gmail OAuth via Google OAuth token flow and Firebase `signInWithIdp`.
-- Paste your Firebase Web API key in the login form.
-- For Gmail OAuth, also provide a Google OAuth Client ID.
-- After successful login, the client auto-requests a gateway dev token and prepares socket connection.
+| Service | Port | Purpose |
+|---------|------|---------|
+| `services/gateway` | 8080 | WebSocket/HTTP gateway, auth, Kafka producer/consumers |
+| `services/message-service` | 8090 | Kafka consumers, PostgreSQL persistence, delivery events |
+| `services/dlq-worker` | 8095 | Dead letter queue consumer, retry, audit stats |
+| `web/client` | 5173 | React + Vite client |
 
 ## Kafka Topic Design
 
-- `messages`
-  - Producer: gateway
-  - Consumer: message-service
-  - Key: `chat_id` (keeps per-chat message order)
-- `events`
-  - Producer: gateway (typing/read), message-service (deliver)
-  - Consumers: gateway, message-service
-  - Key: `chat_id` (keeps per-chat event order)
-- `presence`
-  - Producer: gateway
-  - Consumer: gateway
-  - Key: `chat_id` (keeps per-chat presence ordering)
-- `dead_letters`
-  - Producer: message-service (invalid/failed message/event processing)
-  - Consumer: ops tooling / replay jobs
-  - Key: `chat_id` when available
-
-## Reliability Semantics
-
-- Consumers run with `autoCommit: false`.
-- Offsets are committed only after successful processing/fanout.
-- Handler retries use bounded backoff for transient failures.
-- Payload shape is validated before DB writes.
-- Malformed/invalid/failed payloads are published to `dead_letters` for audit and replay.
-- Malformed payloads are committed after DLQ publication to prevent partition stalls.
-
-## Architecture Diagram (Text)
-
-```text
-+--------------------+          ws/http          +-------------------------+
-|   React Client     | <-----------------------> |   Gateway Service       |
-| (Vite, browser)    |                           | (JWT, WebSocket, Kafka) |
-+--------------------+                           +-----------+-------------+
-                                                             |
-               +---------------------------------------------+---------------------------------------------+
-               |                                                                                           |
-        produce messages/events/presence                                                            consume events/presence
-               |                                                                                           |
-               v                                                                                           v
-       +--------------------+                                                                   +--------------------+
-       |     Kafka          | <-------------------- produce deliver events ---------------------- |  Message Service   |
-       | topics:            |                                                                   | (consume messages, |
-       | messages/events/   | -------------------- consume messages/events --------------------> | persist, publish)  |
-       | presence           |                                                                   +---------+----------+
-       +--------------------+                                                                             |
-                                                                                                           |
-                                                                                                  write idempotent rows
-                                                                                                           |
-                                                                                                           v
-                                                                                                   +---------------+
-                                                                                                   |  PostgreSQL   |
-                                                                                                   | messages,     |
-                                                                                                   | read_receipts |
-                                                                                                   +---------------+
-```
-
-A standalone copy is available in `docs/architecture.txt`.
+| Topic | Producer | Consumer | Key |
+|-------|----------|----------|-----|
+| `messages` | Gateway | Message Service | `chat_id` |
+| `events` | Gateway, Message Service | Gateway, Message Service | `chat_id` |
+| `presence` | Gateway | Gateway | `chat_id` |
+| `dead_letters` | Message Service | DLQ Worker | `chat_id` |
 
 ## Setup Guide
 
-### 1. Prerequisites
+### Prerequisites
+- Node.js 22+, npm 10+
+- Docker + Docker Compose
 
-- Node.js 22+
-- npm 10+
-- Docker + Docker Compose (for Kafka/Postgres and optional full stack)
-
-### 2. Environment
+### Quick Start
 
 ```bash
 cp .env.example .env
-```
-
-### 3. Install Dependencies
-
-```bash
 npm install
-```
-
-### 4. Start Infra (Kafka + Postgres)
-
-```bash
-docker compose up -d zookeeper kafka postgres
-```
-
-### 5. Start App in Development Mode
-
-```bash
-npm run dev
+docker compose up -d zookeeper kafka postgres    # Start infra
+npm run dev                                       # Start all services
 ```
 
 - Gateway: `http://localhost:8080`
-- Message Service health: `http://localhost:8090/health`
 - Client: `http://localhost:5173`
+- Message Service: `http://localhost:8090/health`
 
-### 6. Full Docker Stack (Optional)
+### Full Docker Stack
 
 ```bash
 docker compose up --build -d
 ```
 
-This starts:
-
-- `gateway`
-- `message-service`
-- `gateway-lb` (listens on `:8080`)
-- Kafka/Zookeeper/Postgres
-
-### 7. Scale Gateway Instances
+### Scale Gateway
 
 ```bash
 docker compose up --build -d --scale gateway=3 gateway message-service gateway-lb
 ```
 
-Use `gateway-lb` endpoint (`http://localhost:8080`, `ws://localhost:8080/ws`) when scaled.
+## Kubernetes Deployment
 
-## Operational Endpoints
+```bash
+kubectl apply -f k8s/namespace.yaml
+kubectl apply -f k8s/configmap.yaml
+kubectl create secret generic kafka-chat-secrets \
+  --namespace kafka-chat \
+  --from-literal=JWT_SECRET=your-secret \
+  --from-literal=POSTGRES_USER=chatuser \
+  --from-literal=POSTGRES_PASSWORD=chatpass
+kubectl apply -f k8s/deployments.yaml
+kubectl apply -f k8s/ingress.yaml
+```
 
-- Gateway
-  - `GET /health`
-  - `GET /ready`
-  - `GET /crypto/public-key`
-  - `GET /dev/token?user_id=<id>&name=<displayName>` (non-production only)
-- Message Service
-  - `GET /health`
-  - `GET /ready`
-  - `GET /messages?chat_id=<id>&limit=30&before=<iso>`
+## API Endpoints
 
-## Development Workflow
+| Endpoint | Service | Description |
+|----------|---------|-------------|
+| `GET /health` | Gateway | Health check with readiness status |
+| `GET /ready` | Gateway | Readiness probe |
+| `GET /crypto/public-key` | Gateway | RSA public key for encryption |
+| `GET /dev/token?user_id=&name=` | Gateway | Dev token (non-production) |
+| `GET /messages?chat_id=&limit=&before=` | Message Service | Paginated message history |
+| `GET /dlq/stats` | DLQ Worker | Dead letter queue statistics |
 
-Use these scripts from the repo root:
+## CI/CD
 
-- `npm run dev`
-- `npm run dev:gateway`
-- `npm run dev:message`
-- `npm run dev:client`
-- `npm run build:client`
+GitHub Actions workflows in `.github/workflows/`:
+- **ci.yml**: Build client, Docker images, integration health checks
 
-## Security Note
+## Development Scripts
 
-Current encryption is transport-level between browser and gateway session. For strict end-to-end cryptography where server cannot decrypt content, add client-side key ownership and encrypted payload persistence without gateway plaintext handling.
+```bash
+npm run dev              # All services
+npm run dev:gateway      # Gateway only
+npm run dev:message      # Message service only
+npm run dev:dlq          # DLQ worker only
+npm run dev:client       # Frontend only
+npm run build:client     # Production build
+```
